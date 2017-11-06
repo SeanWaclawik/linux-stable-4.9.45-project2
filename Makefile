@@ -1,7 +1,7 @@
 VERSION = 4
 PATCHLEVEL = 9
 SUBLEVEL = 45
-EXTRAVERSION =-waclas-premog2-sullyd5
+EXTRAVERSION =-waclas-premog2-sullid5
 NAME = Roaring Lionus
 
 # *DOCUMENTATION*
