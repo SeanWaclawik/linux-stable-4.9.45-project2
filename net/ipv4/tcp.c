@@ -1074,34 +1074,6 @@ void tcp_free_fastopen_req(struct tcp_sock *tp)
 	}
 }
 
-static int tcp_sendmsg_fastopen(struct sock *sk, struct msghdr *msg,
-				int *copied, size_t size)
-{
-	struct tcp_sock *tp = tcp_sk(sk);
-	struct sockaddr *uaddr = msg->msg_name;
-	int err, flags;
-
-	if (!(sysctl_tcp_fastopen & TFO_CLIENT_ENABLE) ||
-	    (uaddr && msg->msg_namelen >= sizeof(uaddr->sa_family) &&
-	     uaddr->sa_family == AF_UNSPEC))
-		return -EOPNOTSUPP;
-	if (tp->fastopen_req)
-		return -EALREADY; /* Another Fast Open is in progress */
-
-	tp->fastopen_req = kzalloc(sizeof(struct tcp_fastopen_request),
-				   sk->sk_allocation);
-	if (unlikely(!tp->fastopen_req))
-		return -ENOBUFS;
-	tp->fastopen_req->data = msg;
-	tp->fastopen_req->size = size;
-
-	flags = (msg->msg_flags & MSG_DONTWAIT) ? O_NONBLOCK : 0;
-	err = __inet_stream_connect(sk->sk_socket, uaddr,
-				    msg->msg_namelen, flags);
-	*copied = tp->fastopen_req->copied;
-	tcp_free_fastopen_req(tp);
-	return err;
-}
 
 int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 {
@@ -1117,14 +1089,7 @@ int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 	lock_sock(sk);
 
 	flags = msg->msg_flags;
-	if (flags & MSG_FASTOPEN) {
-		err = tcp_sendmsg_fastopen(sk, msg, &copied_syn, size);
-		if (err == -EINPROGRESS && copied_syn > 0)
-			goto out;
-		else if (err)
-			goto out_err;
-	}
-
+	
 	timeo = sock_sndtimeo(sk, flags & MSG_DONTWAIT);
 
 	tcp_rate_check_app_limited(sk);  /* is sending application-limited? */
