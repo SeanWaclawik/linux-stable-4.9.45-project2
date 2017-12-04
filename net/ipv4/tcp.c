@@ -1102,9 +1102,191 @@ static int tcp_sendmsg_fastopen(struct sock *sk, struct msghdr *msg,
 	tcp_free_fastopen_req(tp);
 	return err;
 }
-
+#define RPI_TEST 1
 int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 {
+#ifdef RPI_TEST
+	printk(KERN_INFO "Testing tcp_sendmsg");
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct sk_buff *skb;
+	struct sockcm_cookie sockc;
+	int flags, err, copied = 0;
+	int mss_now = 0, size_goal, copied_syn = 0;
+	bool process_backlog = false;
+	bool sg;
+	long timeo;
+
+
+
+
+	lock_sock(sk);
+
+	flags = msg->msg_flags;
+	// no fastopen
+
+	timeo = sock_sndtimeo(sk, flags & MSG_DONTWAIT);
+
+
+
+	sg = 0;
+//	sg = !!(sk->sk_route_caps & NETIF_F_SG);
+
+
+
+	/* Ensures that we wait for a connection to finish */
+	if ((1 << sk->sk_state) & ~(TCPF_ESTABLISHED | TCPF_CLOSE_WAIT)) {
+		err = sk_stream_wait_connect(sk, &timeo);
+		if(err != 0) {
+			printk(KERN_ERR "ERROR: tcp_sendmsg() - failed to wait to connect");
+			return 0;
+		}
+	}
+
+
+	/* don't know if this is necessary but we will keep it here for now */
+	sk_clear_bit(SOCKWQ_ASYNC_NOSPACE, sk);
+
+
+	copied = 0;
+
+
+	/* mss_now is the size of the segment, needs to be passed to tcp_push() */
+	/* tcp_send_mss also sets the value of size_goal */
+	mss_now = tcp_send_mss(sk, &size_goal, flags);
+
+	/* start writing tcp segments */ 
+	while(msg_data_left(msg)) {
+		int copy = 0;
+		int max_copyable = size_goal;
+
+		
+		/* set the sk_buff to the last buffer in the sk queue */
+		skb = tcp_write_queue_tail(sk);
+
+
+		/* if this is NOT the first sk_buff in the queue */
+		if (tcp_send_head(sk)) {
+			copy = max_copyable - skb->len;
+			printk(KERN_INFO "INFO tcp_sendmsg() - tcp_send_head true");
+		}
+
+		
+		if(copy <= 0) {
+			bool first_skb;
+
+			if(!sk_stream_memory_free(sk)) {
+				/* in original tcp_sengmsg, a call to set_bit() is made here.
+				 *   Also, a push is attempted if data has been copied or
+				 *	 copied > 0
+				 */
+				printk(KERN_INFO "INFO tcp_sendmsg() - no stream memory free");
+				return 0;
+			}
+
+
+			first_skb = skb_queue_empty(&sk->sk_write_queue);
+
+
+			/* Allocate space to the stream */
+			skb = sk_stream_alloc_skb(sk, select_size(sk, sg, first_skb), sk->sk_allocation, first_skb);
+			if(!skb) {
+				printk(KERN_INFO "INFO tcp_sendmsg() - stream allocation failed");
+				return 0;
+			}
+
+
+
+			/* 
+			 *	TODO: checksum 
+			 */
+
+			/* set beginning and end sequence of sk_buff to the next unwritten
+			 *	byte of the socket. The end sequence will be properly set at the end */ 
+			skb_entail(sk, skb);
+			copy = size_goal;
+			max_copyable = size_goal;
+		}
+
+
+		/* Try appending data to the end of skb */
+		if (copy > msg_data_left(msg))
+			copy = msg_data_left(msg);
+
+
+		/* Check if there's space at the end of skb */
+		if(skb_availroom(skb) > 0) {
+			copy = min_t(int, copy, skb_availroom(skb));
+
+			
+			/* now let's actually add the data */
+			err = skb_add_data_nocache(sk, skb, &msg->msg_iter, copy);
+			if(err) {
+				printk(KERN_ERR "ERROR tcp_sendmsg() - adding message data to sk_buff failed");
+				return 0;
+			}
+
+		}
+		else { /* Otherwise we either merge this segment with the page or add a new page */
+			bool merge = true;
+
+			int i = skb_shinfo(skb)->nr_frags;
+			struct page_frag *pfrag = sk_page_frag(sk);
+
+
+			/* 
+				TODO: check if we need to merge or coalesce
+			*/
+			if(!skb_can_coalesce(skb, i, pfrag->page, pfrag->offset)) {
+				printk(KERN_INFO "INFO tcp_sendmsg() - can't coalesce sk_buff -> shouldn't be merging.");				
+			}
+
+			copy = min_t(int, copy, pfrag->size - pfrag->offset);
+
+
+			/* copy data to page */
+			err = skb_copy_to_page_nocache(sk, &msg->msg_iter, skb, pfrag->page, pfrag->offset, copy);
+			if(err) {
+				printk(KERN_ERR "ERROR tcp_sendmsg() - copying data to page failed");
+				return 0;
+			}
+
+			/* update sk_buff */
+			if (merge) {
+				skb_frag_size_add(&skb_shinfo(skb)->frags[i - 1], copy);
+			}
+
+			pfrag->offset += copy;
+		}
+
+		/* letting the sk_buff know that we've initiated data copying */
+		if (!copied)
+			TCP_SKB_CB(skb)->tcp_flags &= ~TCPHDR_PSH;
+
+
+		tp->write_seq += copy;
+		TCP_SKB_CB(skb)->end_seq += copy;
+		tcp_skb_pcount_set(skb, 0);
+
+		copied += copy;
+
+
+		if (!msg_data_left(msg)) {
+			tcp_tx_timestamp(sk, sockc.tsflags, skb);
+
+			tcp_push(sk, flags, mss_now, tp->nonagle, size_goal);
+			release_sock(sk);
+			return copied + copied_syn;
+		}
+
+	}
+
+	if(copied) 
+		tcp_push(sk, flags, mss_now, tp->nonagle, size_goal);
+
+	release_sock(sk);
+	return copied + copied_syn;
+#endif /* RPI_TEST */
+#ifndef RPI_TEST
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sk_buff *skb;
 	struct sockcm_cookie sockc;
@@ -1346,6 +1528,8 @@ out_err:
 		sk->sk_write_space(sk);
 	release_sock(sk);
 	return err;
+
+#endif /* RPI_TEST not defined */
 }
 EXPORT_SYMBOL(tcp_sendmsg);
 
