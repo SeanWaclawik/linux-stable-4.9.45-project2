@@ -1074,6 +1074,7 @@ void tcp_free_fastopen_req(struct tcp_sock *tp)
 	}
 }
 
+<<<<<<< HEAD
 static int tcp_sendmsg_fastopen(struct sock *sk, struct msghdr *msg,
 				int *copied, size_t size)
 {
@@ -1299,14 +1300,7 @@ int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 	lock_sock(sk);
 
 	flags = msg->msg_flags;
-	if (flags & MSG_FASTOPEN) {
-		err = tcp_sendmsg_fastopen(sk, msg, &copied_syn, size);
-		if (err == -EINPROGRESS && copied_syn > 0)
-			goto out;
-		else if (err)
-			goto out_err;
-	}
-
+	
 	timeo = sock_sndtimeo(sk, flags & MSG_DONTWAIT);
 
 	tcp_rate_check_app_limited(sk);  /* is sending application-limited? */
