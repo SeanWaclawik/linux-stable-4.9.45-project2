@@ -1074,7 +1074,6 @@ void tcp_free_fastopen_req(struct tcp_sock *tp)
 	}
 }
 
-<<<<<<< HEAD
 static int tcp_sendmsg_fastopen(struct sock *sk, struct msghdr *msg,
 				int *copied, size_t size)
 {
@@ -1103,10 +1102,10 @@ static int tcp_sendmsg_fastopen(struct sock *sk, struct msghdr *msg,
 	tcp_free_fastopen_req(tp);
 	return err;
 }
-#define RPI_TEST 1
+//#define RPI_TEST_SENDMSG 1
 int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 {
-#ifdef RPI_TEST
+#ifdef RPI_TEST_SENDMSG
 	printk(KERN_INFO "Testing tcp_sendmsg");
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sk_buff *skb;
@@ -1286,8 +1285,8 @@ int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 
 	release_sock(sk);
 	return copied + copied_syn;
-#endif /* RPI_TEST */
-#ifndef RPI_TEST
+#endif /* RPI_TEST_SENDMSG */
+#ifndef RPI_TEST_SENDMSG
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sk_buff *skb;
 	struct sockcm_cookie sockc;
@@ -1792,10 +1791,11 @@ EXPORT_SYMBOL(tcp_peek_len);
  *	tricks with *seq access order and skb->users are not required.
  *	Probably, code can be easily improved even more.
  */
-
+//#define RPI_TEST_RECVMSG 1
 int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
 		int flags, int *addr_len)
 {
+#ifndef RPI_TEST_RECVMSG
 	struct tcp_sock *tp = tcp_sk(sk);
 	int copied = 0;
 	u32 peek_seq;
@@ -2128,6 +2128,235 @@ recv_urg:
 recv_sndq:
 	err = tcp_peek_sndq(sk, msg, len);
 	goto out;
+#endif
+#ifdef RPI_TEST_RECVMSG
+	struct tcp_sock *tp = tcp_sk(sk);
+	int copied = 0;
+	u32 peek_seq;
+	u32 *seq;
+	unsigned long used;
+	int err;
+	int target;		/* Read at least this many bytes */
+	long timeo;
+	struct task_struct *user_recv = NULL;
+	struct sk_buff *skb, *last;
+	u32 urg_hole = 0;
+
+
+
+	lock_sock(sk);
+
+	err = -ENOTCONN;
+	if(sk->sk_state == TCP_LISTEN){
+		release_sock(sk);
+		return err;
+	}
+
+	timeo = sock_rcvtimeo(sk, nonblock);
+
+
+	/* leave out urgent data */
+
+
+	/* leave out repair */
+
+
+	seq = &tp->copied_seq;
+
+	/* look at data without actually 'touching' it.
+			Data remains unread. 
+	*/
+	if(flags & MSG_PEEK) {
+		peek_seq = tp->copied_seq;
+		seq = &peek_seq;
+	}
+
+
+	target = sock_rcvlowat(sk, flags & MSG_WAITALL, len);
+
+
+	do {
+		u32 offset;
+
+		/* leave out urgent data */
+
+		/* get a buffer */
+		last = skb_peek_tail(&sk->sk_receive_queue);
+		skb_queue_walk(&sk->sk_receive_queue, skb) {
+			last = skb;
+
+			offset = *seq - TCP_SKB_CB(skb)->seq;
+
+			if(offset < skb->len) {
+				/* goto found_ok_skb */
+				/* Ok so how much can we use? */
+				used = skb->len - offset;
+				if (len < used)
+					used = len;
+
+
+				*seq += used;
+				copied += used;
+				len -= used;
+
+				tcp_rcv_space_adjust(sk);
+
+				if (used + offset < skb->len)
+					continue;
+
+			}
+
+			if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN) {
+				/* goto found_fin_ok */
+
+				++*seq;
+				if (!(flags & MSG_PEEK))
+					sk_eat_skb(sk, skb);
+				break;
+			}
+		}
+
+		if (copied >= target && !sk->sk_backlog.tail)
+			break;
+
+		/* without this, the kernel crashes... let's hope this works..
+
+				Just kidding, the kernel still crashes.
+		 */
+		if (copied) {
+			if (sk->sk_err ||
+			    sk->sk_state == TCP_CLOSE ||
+			    (sk->sk_shutdown & RCV_SHUTDOWN) ||
+			    !timeo ||
+			    signal_pending(current))
+				break;
+		} else {
+			if (sock_flag(sk, SOCK_DONE))
+				break;
+
+			if (sk->sk_err) {
+				copied = sock_error(sk);
+				break;
+			}
+
+			if (sk->sk_shutdown & RCV_SHUTDOWN)
+				break;
+
+			if (sk->sk_state == TCP_CLOSE) {
+				if (!sock_flag(sk, SOCK_DONE)) {
+					/* This occurs when user tries to read
+					 * from never connected socket.
+					 */
+					copied = -ENOTCONN;
+					break;
+				}
+				break;
+			}
+
+			if (!timeo) {
+				copied = -EAGAIN;
+				break;
+			}
+
+			if (signal_pending(current)) {
+				copied = sock_intr_errno(timeo);
+				break;
+			}
+		}
+
+
+		tcp_cleanup_rbuf(sk, copied);
+
+		if (!sysctl_tcp_low_latency && tp->ucopy.task == user_recv) {
+			
+			/* let the socket know our task is to receive */
+			if(!user_recv && !(flags & MSG_PEEK)) {
+				user_recv = current;
+				tp->ucopy.task = user_recv;
+				tp->ucopy.msg = msg;
+			}
+
+			tp->ucopy.len = len;
+
+			if(!skb_queue_empty(&tp->ucopy.prequeue)) {
+				/* goto do_prequeue */
+				tcp_prequeue_process(sk);
+
+				int chunk = len - tp->ucopy.len;
+				if(chunk != 0) {
+					len -= chunk;
+					copied += chunk;
+				}
+			}
+
+			if((flags & MSG_PEEK) && (peek_seq - copied /*- urg_hole*/ != tp->copied_seq)){
+				peek_seq = tp->copied_seq;
+			}
+			continue;
+		}
+
+		if(copied >= target) {
+			release_sock(sk);
+			lock_sock(sk);
+		} else {
+			sk_wait_data(sk, &timeo, last);
+		}
+
+		if(user_recv) {
+			int chunk;
+
+			chunk = len - tp->ucopy.len;
+			if(chunk != 0) {
+				len -= chunk;
+				copied += chunk;
+			}
+
+			if (tp->rcv_nxt == tp->copied_seq &&
+			    !skb_queue_empty(&tp->ucopy.prequeue)) {
+				tcp_prequeue_process(sk);
+
+				chunk = len - tp->ucopy.len;
+				if(chunk != 0) {
+					len -= chunk;
+					copied += chunk;
+				}
+			}
+		}
+		
+		if((flags & MSG_PEEK) && (peek_seq - copied /*- urg_hole*/ != tp->copied_seq)){
+				peek_seq = tp->copied_seq;
+		}
+		continue;
+
+
+	} while (len > 0);
+
+	if (user_recv) {
+		if(!skb_queue_empty(&tp->ucopy.prequeue)) {
+			int chunk;
+
+			/* set copied length equal to copy if we've copied more than 0 */
+			tp->ucopy.len = copied > 0 ? len : 0;
+
+			tcp_prequeue_process(sk);
+
+			if(copied > 0 && (chunk = len - tp->ucopy.len) != 0) {
+				/* leave out stats */
+				len -= chunk;
+				copied += chunk;
+			}
+		}
+
+		tp->ucopy.task = NULL;
+		tp->ucopy.len = 0;
+	}
+
+	tcp_cleanup_rbuf(sk, copied);
+
+	release_sock(sk);
+	return copied;
+
+#endif
 }
 EXPORT_SYMBOL(tcp_recvmsg);
 
