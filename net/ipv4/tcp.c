@@ -1791,7 +1791,7 @@ EXPORT_SYMBOL(tcp_peek_len);
  *	tricks with *seq access order and skb->users are not required.
  *	Probably, code can be easily improved even more.
  */
-//#define RPI_TEST_RECVMSG 1
+#define RPI_TEST_RECVMSG 1
 int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
 		int flags, int *addr_len)
 {
@@ -2142,7 +2142,11 @@ recv_sndq:
 	struct sk_buff *skb, *last;
 	u32 urg_hole = 0;
 
+	printk(KERN_INFO "HERE_1");
 
+	if (sk_can_busy_loop(sk) && skb_queue_empty(&sk->sk_receive_queue) &&
+	    (sk->sk_state == TCP_ESTABLISHED))
+		sk_busy_loop(sk, nonblock);
 
 	lock_sock(sk);
 
@@ -2160,7 +2164,7 @@ recv_sndq:
 
 	/* leave out repair */
 
-
+	printk(KERN_INFO "HERE_2");
 	seq = &tp->copied_seq;
 
 	/* look at data without actually 'touching' it.
