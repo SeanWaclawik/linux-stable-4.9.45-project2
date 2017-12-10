@@ -2142,91 +2142,64 @@ recv_sndq:
 	struct sk_buff *skb, *last;
 	u32 urg_hole = 0;
 
-	printk(KERN_INFO "HERE_1");
-
 	if (sk_can_busy_loop(sk) && skb_queue_empty(&sk->sk_receive_queue) &&
 	    (sk->sk_state == TCP_ESTABLISHED))
 		sk_busy_loop(sk, nonblock);
 
 	lock_sock(sk);
 
-	err = -ENOTCONN;
-	if(sk->sk_state == TCP_LISTEN){
-		release_sock(sk);
-		return err;
-	}
+	/* removed error to check for listening */
 
 	timeo = sock_rcvtimeo(sk, nonblock);
 
+	/* Urgent removed */
 
-	/* leave out urgent data */
-
-
-	/* leave out repair */
-
-	printk(KERN_INFO "HERE_2");
 	seq = &tp->copied_seq;
-
-	/* look at data without actually 'touching' it.
-			Data remains unread. 
-	*/
-	if(flags & MSG_PEEK) {
+	if (flags & MSG_PEEK) {
 		peek_seq = tp->copied_seq;
 		seq = &peek_seq;
 	}
 
-
 	target = sock_rcvlowat(sk, flags & MSG_WAITALL, len);
-
 
 	do {
 		u32 offset;
 
-		/* leave out urgent data */
+		/* Urgent removed */
 
-		/* get a buffer */
+		/* Next get a buffer. */
+
 		last = skb_peek_tail(&sk->sk_receive_queue);
 		skb_queue_walk(&sk->sk_receive_queue, skb) {
 			last = skb;
+			/* Now that we have two receive queues this
+			 * shouldn't happen.
+			 */
+
+			/* removed warn */
 
 			offset = *seq - TCP_SKB_CB(skb)->seq;
-
-			if(offset < skb->len) {
-				/* goto found_ok_skb */
-				/* Ok so how much can we use? */
-				used = skb->len - offset;
-				if (len < used)
-					used = len;
-
-
-				*seq += used;
-				copied += used;
-				len -= used;
-
-				tcp_rcv_space_adjust(sk);
-
-				if (used + offset < skb->len)
-					continue;
-
-			}
-
-			if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN) {
-				/* goto found_fin_ok */
-
+			/* removed unlikely */
+			
+			if (offset < skb->len)
+				goto found_ok_skb;
+			if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+			{
+				/* Process the FIN. */
 				++*seq;
 				if (!(flags & MSG_PEEK))
 					sk_eat_skb(sk, skb);
-				break;
+				tcp_cleanup_rbuf(sk, copied);
+				release_sock(sk);
+				return copied;
 			}
 		}
 
+		/* Well, if we have backlog, try to process it now yet. */
+		
 		if (copied >= target && !sk->sk_backlog.tail)
 			break;
 
-		/* without this, the kernel crashes... let's hope this works..
-
-				Just kidding, the kernel still crashes.
-		 */
 		if (copied) {
 			if (sk->sk_err ||
 			    sk->sk_state == TCP_CLOSE ||
@@ -2234,47 +2207,13 @@ recv_sndq:
 			    !timeo ||
 			    signal_pending(current))
 				break;
-		} else {
-			if (sock_flag(sk, SOCK_DONE))
-				break;
-
-			if (sk->sk_err) {
-				copied = sock_error(sk);
-				break;
-			}
-
-			if (sk->sk_shutdown & RCV_SHUTDOWN)
-				break;
-
-			if (sk->sk_state == TCP_CLOSE) {
-				if (!sock_flag(sk, SOCK_DONE)) {
-					/* This occurs when user tries to read
-					 * from never connected socket.
-					 */
-					copied = -ENOTCONN;
-					break;
-				}
-				break;
-			}
-
-			if (!timeo) {
-				copied = -EAGAIN;
-				break;
-			}
-
-			if (signal_pending(current)) {
-				copied = sock_intr_errno(timeo);
-				break;
-			}
-		}
-
+		} /* removed big error check block */
 
 		tcp_cleanup_rbuf(sk, copied);
 
 		if (!sysctl_tcp_low_latency && tp->ucopy.task == user_recv) {
-			
-			/* let the socket know our task is to receive */
-			if(!user_recv && !(flags & MSG_PEEK)) {
+			/* Install new reader */
+			if (!user_recv && !(flags & (MSG_TRUNC | MSG_PEEK))) {
 				user_recv = current;
 				tp->ucopy.task = user_recv;
 				tp->ucopy.msg = msg;
@@ -2282,70 +2221,124 @@ recv_sndq:
 
 			tp->ucopy.len = len;
 
-			if(!skb_queue_empty(&tp->ucopy.prequeue)) {
-				/* goto do_prequeue */
-				tcp_prequeue_process(sk);
+			/* removed warn	*/
 
-				int chunk = len - tp->ucopy.len;
-				if(chunk != 0) {
-					len -= chunk;
-					copied += chunk;
-				}
-			}
+			/* Ugly... If prequeue is not empty, we have to
+			 * process it before releasing socket, otherwise
+			 * order will be broken at second iteration.
+			 * More elegant solution is required!!!
+			 *
+			 * Look: we have the following (pseudo)queues:
+			 *
+			 * 1. packets in flight
+			 * 2. backlog
+			 * 3. prequeue
+			 * 4. receive_queue
+			 *
+			 * Each queue can be processed only if the next ones
+			 * are empty. At this point we have empty receive_queue.
+			 * But prequeue _can_ be not empty after 2nd iteration,
+			 * when we jumped to start of loop because backlog
+			 * processing added something to receive_queue.
+			 * We cannot release_sock(), because backlog contains
+			 * packets arrived _after_ prequeued ones.
+			 *
+			 * Shortly, algorithm is clear --- to process all
+			 * the queues in order. We could make it more directly,
+			 * requeueing packets from backlog to prequeue, if
+			 * is not empty. It is more elegant, but eats cycles,
+			 * unfortunately.
+			 */
+			if (!skb_queue_empty(&tp->ucopy.prequeue))
+				goto do_prequeue;
 
-			if((flags & MSG_PEEK) && (peek_seq - copied /*- urg_hole*/ != tp->copied_seq)){
-				peek_seq = tp->copied_seq;
-			}
-			continue;
+			/* __ Set realtime policy in scheduler __ */
 		}
 
-		if(copied >= target) {
+		if (copied >= target) {
+			/* Do not sleep, just process backlog. */
 			release_sock(sk);
 			lock_sock(sk);
 		} else {
 			sk_wait_data(sk, &timeo, last);
 		}
 
-		if(user_recv) {
+		if (user_recv) {
 			int chunk;
 
+			/* __ Restore normal policy in scheduler __ */
+
 			chunk = len - tp->ucopy.len;
-			if(chunk != 0) {
+			if (chunk != 0) {
+				NET_ADD_STATS(sock_net(sk), LINUX_MIB_TCPDIRECTCOPYFROMBACKLOG, chunk);
 				len -= chunk;
 				copied += chunk;
 			}
 
 			if (tp->rcv_nxt == tp->copied_seq &&
 			    !skb_queue_empty(&tp->ucopy.prequeue)) {
+do_prequeue:
 				tcp_prequeue_process(sk);
 
 				chunk = len - tp->ucopy.len;
-				if(chunk != 0) {
+				if (chunk != 0) {
+					NET_ADD_STATS(sock_net(sk), LINUX_MIB_TCPDIRECTCOPYFROMPREQUEUE, chunk);
 					len -= chunk;
 					copied += chunk;
 				}
 			}
 		}
-		
-		if((flags & MSG_PEEK) && (peek_seq - copied /*- urg_hole*/ != tp->copied_seq)){
-				peek_seq = tp->copied_seq;
-		}
+		/* removed if ((flags & MSG_PEEK) && ... */
 		continue;
 
+	found_ok_skb:
+		/* Ok so how much can we use? */
+		used = skb->len - offset;
+		if (len < used)
+			used = len;
+
+		/* Urgent data removed */
+		
+		/* Need this to prevent crash */
+		if (!(flags & MSG_TRUNC)) {
+			skb_copy_datagram_msg(skb, offset, msg, used);
+			/* removed err check */
+		}
+
+		*seq += used;
+		copied += used;
+		len -= used;
+
+		tcp_rcv_space_adjust(sk);
+
+		/* Urgent data removed*/
+
+		if (used + offset < skb->len)
+			continue;
+
+		if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+		{
+			/* Process the FIN. */
+			++*seq;
+			if (!(flags & MSG_PEEK))
+				sk_eat_skb(sk, skb);
+			break;
+		}
+			
+		/* removed if (!(flags & MSG_PEEK)) */
 
 	} while (len > 0);
 
 	if (user_recv) {
-		if(!skb_queue_empty(&tp->ucopy.prequeue)) {
+		if (!skb_queue_empty(&tp->ucopy.prequeue)) {
 			int chunk;
 
-			/* set copied length equal to copy if we've copied more than 0 */
 			tp->ucopy.len = copied > 0 ? len : 0;
 
 			tcp_prequeue_process(sk);
 
-			if(copied > 0 && (chunk = len - tp->ucopy.len) != 0) {
-				/* leave out stats */
+			if (copied > 0 && (chunk = len - tp->ucopy.len) != 0) {
+				NET_ADD_STATS(sock_net(sk), LINUX_MIB_TCPDIRECTCOPYFROMPREQUEUE, chunk);
 				len -= chunk;
 				copied += chunk;
 			}
@@ -2355,6 +2348,11 @@ recv_sndq:
 		tp->ucopy.len = 0;
 	}
 
+	/* According to UNIX98, msg_name/msg_namelen are ignored
+	 * on connected socket. I was just happy when found this 8) --ANK
+	 */
+
+	/* Clean up data we have read: This will do ACK frames. */
 	tcp_cleanup_rbuf(sk, copied);
 
 	release_sock(sk);
