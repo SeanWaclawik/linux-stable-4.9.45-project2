@@ -1462,6 +1462,8 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
 	long timeo;
 	struct task_struct *user_recv = NULL;
 	struct sk_buff *skb, *last;
+	int okSkb = 0;
+	int preQ = 0;
 
 	lock_sock(sk);
 	
@@ -1494,9 +1496,12 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
 			offset = *seq - TCP_SKB_CB(skb)->seq;
 			/* removed unlikely */
 			
-			if (offset < skb->len)
-				goto found_ok_skb;
-			if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+			if (offset < skb->len) {
+				/* found ok skb */
+				okSkb = 1;
+			}
+
+			else if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
 			{
 				/* Process the FIN. */
 				++*seq;
@@ -1508,106 +1513,124 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
 			}
 		}
 
-		/* Well, if we have backlog, try to process it now yet. */
-		
-		if (copied >= target && !sk->sk_backlog.tail)
-			break;
+		if (!okSkb){
+			/* Well, if we have backlog, try to process it now yet. */
 
-		if (copied) {
-			if (sk->sk_err ||
-			    sk->sk_state == TCP_CLOSE ||
-			    (sk->sk_shutdown & RCV_SHUTDOWN) ||
-			    !timeo ||
-			    signal_pending(current))
+			if (copied >= target && !sk->sk_backlog.tail)
 				break;
-		} /* removed big error check block */
 
-		tcp_cleanup_rbuf(sk, copied);
+			if (copied) {
+				if (sk->sk_err ||
+					sk->sk_state == TCP_CLOSE ||
+					(sk->sk_shutdown & RCV_SHUTDOWN) ||
+					!timeo ||
+					signal_pending(current))
+					break;
+			} /* removed big error check block */
 
-		if (!sysctl_tcp_low_latency && tp->ucopy.task == user_recv) {
-			/* Install new reader */
-			if (!user_recv && !(flags & (MSG_TRUNC | MSG_PEEK))) {
-				user_recv = current;
-				tp->ucopy.task = user_recv;
-				tp->ucopy.msg = msg;
+			tcp_cleanup_rbuf(sk, copied);
+
+			if (!sysctl_tcp_low_latency && tp->ucopy.task == user_recv) {
+				/* Install new reader */
+				if (!user_recv && !(flags & (MSG_TRUNC | MSG_PEEK))) {
+					user_recv = current;
+					tp->ucopy.task = user_recv;
+					tp->ucopy.msg = msg;
+				}
+
+				tp->ucopy.len = len;
+
+				if (!skb_queue_empty(&tp->ucopy.prequeue)){
+					/* do prequeue */
+					preQ = 1;
+				}
+
+
+				/* __ Set realtime policy in scheduler __ */
 			}
 
-			tp->ucopy.len = len;
-
-			if (!skb_queue_empty(&tp->ucopy.prequeue))
-				goto do_prequeue;
-
-			/* __ Set realtime policy in scheduler __ */
-		}
-
-		if (copied >= target) {
-			/* Do not sleep, just process backlog. */
-			release_sock(sk);
-			lock_sock(sk);
-		} else {
-			sk_wait_data(sk, &timeo, last);
-		}
-
-		if (user_recv) {
-			int chunk;
-
-			/* __ Restore normal policy in scheduler __ */
-
-			chunk = len - tp->ucopy.len;
-			if (chunk != 0) {
-				NET_ADD_STATS(sock_net(sk), LINUX_MIB_TCPDIRECTCOPYFROMBACKLOG, chunk);
-				len -= chunk;
-				copied += chunk;
+			if (!preQ){
+				if (copied >= target) {
+					/* Do not sleep, just process backlog. */
+					release_sock(sk);
+					lock_sock(sk);
+				} else {
+					sk_wait_data(sk, &timeo, last);
+				}
 			}
 
-			if (tp->rcv_nxt == tp->copied_seq &&
-			    !skb_queue_empty(&tp->ucopy.prequeue)) {
-do_prequeue:
-				tcp_prequeue_process(sk);
+			if (preQ || user_recv) {
+				int chunk;
+
+				/* __ Restore normal policy in scheduler __ */
 
 				chunk = len - tp->ucopy.len;
 				if (chunk != 0) {
-					NET_ADD_STATS(sock_net(sk), LINUX_MIB_TCPDIRECTCOPYFROMPREQUEUE, chunk);
+					NET_ADD_STATS(sock_net(sk), LINUX_MIB_TCPDIRECTCOPYFROMBACKLOG, chunk);
 					len -= chunk;
 					copied += chunk;
 				}
+
+				if (preQ || (tp->rcv_nxt == tp->copied_seq &&
+					!skb_queue_empty(&tp->ucopy.prequeue)) ) {
+					/* do prequeue */
+					tcp_prequeue_process(sk);
+
+					chunk = len - tp->ucopy.len;
+					if (chunk != 0) {
+						NET_ADD_STATS(sock_net(sk), LINUX_MIB_TCPDIRECTCOPYFROMPREQUEUE, chunk);
+						len -= chunk;
+						copied += chunk;
+					}
+				}
+			}
+
+			/* removed if ((flags & MSG_PEEK) && ... */
+
+			/* unset flag for pre-queue */
+			preQ = 0;
+			if (!okSkb){
+				continue;
 			}
 		}
-		/* removed if ((flags & MSG_PEEK) && ... */
-		continue;
 
-	found_ok_skb:
-		/* Ok so how much can we use? */
-		used = skb->len - offset;
-		if (len < used)
-			used = len;
+		/* ok skb */
+		else {
+			/* turn off flag */
+			okSkb = 0;
 
-		/* Urgent data removed */
-		
-		/* Need this to prevent crash */
-		if (!(flags & MSG_TRUNC)) {
-			skb_copy_datagram_msg(skb, offset, msg, used);
-			/* removed error check */
-		}
+			/* Ok so how much can we use? */
+			used = skb->len - offset;
+			if (len < used)
+				used = len;
 
-		*seq += used;
-		copied += used;
-		len -= used;
+			/* Urgent data removed */
 
-		tcp_rcv_space_adjust(sk);
+			/* Need this to prevent crash */
+			if (!(flags & MSG_TRUNC)) {
+				skb_copy_datagram_msg(skb, offset, msg, used);
+				/* removed error check */
+			}
 
-		/* Urgent data removed*/
+			*seq += used;
+			copied += used;
+			len -= used;
 
-		if (used + offset < skb->len)
-			continue;
+			tcp_rcv_space_adjust(sk);
 
-		if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
-		{
-			/* Process the FIN. */
-			++*seq;
-			if (!(flags & MSG_PEEK))
-				sk_eat_skb(sk, skb);
-			break;
+			/* Urgent data removed*/
+
+			if (used + offset < skb->len)
+				continue;
+
+			if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+			{
+				/* Process the FIN. */
+				++*seq;
+				if (!(flags & MSG_PEEK))
+					sk_eat_skb(sk, skb);
+				break;
+			}
 		}
 			
 		/* removed if (!(flags & MSG_PEEK)) */
