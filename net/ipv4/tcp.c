@@ -2153,10 +2153,6 @@ recv_sndq:
 	/* Urgent removed */
 
 	seq = &tp->copied_seq;
-	if (flags & MSG_PEEK) {
-		peek_seq = tp->copied_seq;
-		seq = &peek_seq;
-	}
 
 	target = sock_rcvlowat(sk, flags & MSG_WAITALL, len);
 
@@ -2219,34 +2215,6 @@ recv_sndq:
 
 			tp->ucopy.len = len;
 
-			/* removed warn	*/
-
-			/* Ugly... If prequeue is not empty, we have to
-			 * process it before releasing socket, otherwise
-			 * order will be broken at second iteration.
-			 * More elegant solution is required!!!
-			 *
-			 * Look: we have the following (pseudo)queues:
-			 *
-			 * 1. packets in flight
-			 * 2. backlog
-			 * 3. prequeue
-			 * 4. receive_queue
-			 *
-			 * Each queue can be processed only if the next ones
-			 * are empty. At this point we have empty receive_queue.
-			 * But prequeue _can_ be not empty after 2nd iteration,
-			 * when we jumped to start of loop because backlog
-			 * processing added something to receive_queue.
-			 * We cannot release_sock(), because backlog contains
-			 * packets arrived _after_ prequeued ones.
-			 *
-			 * Shortly, algorithm is clear --- to process all
-			 * the queues in order. We could make it more directly,
-			 * requeueing packets from backlog to prequeue, if
-			 * is not empty. It is more elegant, but eats cycles,
-			 * unfortunately.
-			 */
 			if (!skb_queue_empty(&tp->ucopy.prequeue))
 				goto do_prequeue;
 
