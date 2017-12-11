@@ -2135,12 +2135,10 @@ recv_sndq:
 	u32 peek_seq;
 	u32 *seq;
 	unsigned long used;
-	int err;
 	int target;		/* Read at least this many bytes */
 	long timeo;
 	struct task_struct *user_recv = NULL;
 	struct sk_buff *skb, *last;
-	u32 urg_hole = 0;
 
 	if (sk_can_busy_loop(sk) && skb_queue_empty(&sk->sk_receive_queue) &&
 	    (sk->sk_state == TCP_ESTABLISHED))
@@ -2302,7 +2300,7 @@ do_prequeue:
 		/* Need this to prevent crash */
 		if (!(flags & MSG_TRUNC)) {
 			skb_copy_datagram_msg(skb, offset, msg, used);
-			/* removed err check */
+			/* removed error check */
 		}
 
 		*seq += used;
